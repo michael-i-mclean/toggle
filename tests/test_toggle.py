@@ -38,8 +38,9 @@ async def test_loads_on_startup(tmp_path):
 
     app = create_app(str(path))
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://localhost:8009") as ac:
-        r = await ac.get(f"/status/{guid}")
-        assert r.status_code == 200
-        assert r.json()["state"] is True
+    async with app.router.lifespan_context(app):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://localhost:8009") as ac:
+            r = await ac.get(f"/status/{guid}")
+            assert r.status_code == 200
+            assert r.json()["state"] is True
