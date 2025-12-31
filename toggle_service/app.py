@@ -2,10 +2,15 @@ from fastapi import FastAPI, HTTPException, Request
 import uuid
 import asyncio
 from typing import Dict, Optional
+from starlette.responses import AsyncContentStream
+from watchfiles import awatch, Change
 from .persistence import load as _load_from_disk, save as _save_to_disk
 from contextlib import asynccontextmanager
 
-def create_app(toggles_file: Optional[str] = "toggles.json") -> FastAPI:
+def create_app(
+        watcher_fn,
+        toggles_file: Optional[str] = "toggles.json"
+    ) -> FastAPI:
     """
     Factory to create a FastAPI app with an encapsulated in-memory store
     and persistence to `toggles_file`.
@@ -13,13 +18,30 @@ def create_app(toggles_file: Optional[str] = "toggles.json") -> FastAPI:
     toggles: Dict[str, bool] = {}
     _store_lock = asyncio.Lock()
     TOGGLES_FILE = toggles_file or "toggles.json"
+    ftp_dir = "/home/reolinkftp/front/2025/12/25"
+
+    new_file_queue = asyncio.Queue()
+
 
     # --- lifecycle ---
-    async def on_startup():
+    async def load_toggles():
         print(f"[DEBUG] on_startup TOGGLES_FILE {TOGGLES_FILE}")
         data = await _load_from_disk(TOGGLES_FILE)
         toggles.clear()
         toggles.update(data)
+
+    async def watch_ftp_task():
+        print(f"[WATCH] Monitoring {ftp_dir} for new files")
+        async for changes in awatch(ftp_dir):
+            for change, path in changes:
+                await new_file_queue.put(path)
+                print(change)
+                print(path)
+
+    async def on_startup():
+        await load_toggles()
+        if watcher_fn:
+            watcher_task = asyncio.create_task(watcher_fn(new_file_queue))
 
     async def on_shutdown():
         async with _store_lock:
@@ -73,6 +95,27 @@ def create_app(toggles_file: Optional[str] = "toggles.json") -> FastAPI:
         if guid not in toggles:
             raise HTTPException(status_code=404, detail="Toggle not found")
         return {"guid": guid, "state": toggles[guid]}
+
+
+    @app.get("/items")
+    async def get_toggles_by_state(state: Optional[bool] = None) -> Dict[str, bool]:
+        """
+        Retrieves all toggle keys and their states.
+        Optionally filters results by the requested boolean state.
+        """
+        async with _store_lock:
+            # If no state parameter is provided, return all toggles
+            if state is None:
+                # Return a copy to prevent accidental external modification
+                return toggles.copy()
+
+            # Filter the toggles based on the requested state (True or False)
+            filtered_toggles = {
+                key: value
+                for key, value in toggles.items()
+                if value == state
+            }
+            return filtered_toggles
 
     # expose internals for testing (lightweight)
     app.state._toggles = toggles
